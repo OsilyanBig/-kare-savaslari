@@ -24,19 +24,102 @@ type AppScreen =
   | 'game';
 
 export default function Home() {
-  const { user, isLoading, setUser, setLoading } = useAuthStore();
+  const { setUser, setLoading } = useAuthStore();
   const [screen, setScreen] = useState<AppScreen>('loading');
   const [currentRoomId, setCurrentRoomId] = useState<string>('');
+  const [authReady, setAuthReady] = useState(false);
 
-  // Auth durumunu kontrol et
   useEffect(() => {
-    checkAuth();
+    let isMounted = true;
 
+    const initAuth = async () => {
+      try {
+        // Mevcut session kontrol et
+        const { data: { session }, error } = await supabase.auth.getSession();
+
+        if (error) {
+          console.error('Session error:', error);
+          if (isMounted) {
+            setScreen('auth');
+            setLoading(false);
+            setAuthReady(true);
+          }
+          return;
+        }
+
+        if (session?.user) {
+          // Profile bilgisini al
+          const { data: profile, error: profileError } = await getProfile(session.user.id);
+
+          if (profileError || !profile) {
+            console.error('Profile error:', profileError);
+            // Profile yoksa oluşturmayı dene
+            const { data: newProfile } = await supabase
+              .from('profiles')
+              .upsert({
+                id: session.user.id,
+                email: session.user.email || '',
+                username: session.user.user_metadata?.username || 'Oyuncu_' + session.user.id.slice(0, 6),
+              })
+              .select()
+              .single();
+
+            if (newProfile && isMounted) {
+              setUser({
+                id: newProfile.id,
+                email: newProfile.email,
+                username: newProfile.username,
+                created_at: newProfile.created_at,
+                achievements: newProfile.achievements || [],
+                total_wins: newProfile.total_wins || 0,
+                total_games: newProfile.total_games || 0,
+                total_conquests: newProfile.total_conquests || 0,
+              });
+              setScreen('menu');
+            } else if (isMounted) {
+              setScreen('auth');
+            }
+          } else if (isMounted) {
+            setUser({
+              id: profile.id,
+              email: profile.email,
+              username: profile.username,
+              created_at: profile.created_at,
+              achievements: profile.achievements || [],
+              total_wins: profile.total_wins || 0,
+              total_games: profile.total_games || 0,
+              total_conquests: profile.total_conquests || 0,
+            });
+            setScreen('menu');
+          }
+        } else {
+          if (isMounted) {
+            setScreen('auth');
+          }
+        }
+      } catch (err) {
+        console.error('Auth init error:', err);
+        if (isMounted) {
+          setScreen('auth');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+          setAuthReady(true);
+        }
+      }
+    };
+
+    initAuth();
+
+    // Auth state değişikliklerini dinle
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        if (!isMounted || !authReady) return;
+
         if (event === 'SIGNED_IN' && session?.user) {
           const { data: profile } = await getProfile(session.user.id);
-          if (profile) {
+          if (profile && isMounted) {
             setUser({
               id: profile.id,
               email: profile.email,
@@ -50,80 +133,74 @@ export default function Home() {
             setScreen('menu');
           }
         } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setScreen('auth');
+          if (isMounted) {
+            setUser(null);
+            setScreen('auth');
+            setCurrentRoomId('');
+          }
+        } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+          // Token yenilendiğinde sadece session'ı güncelle, ekranı değiştirme
+          const { data: profile } = await getProfile(session.user.id);
+          if (profile && isMounted) {
+            setUser({
+              id: profile.id,
+              email: profile.email,
+              username: profile.username,
+              created_at: profile.created_at,
+              achievements: profile.achievements || [],
+              total_wins: profile.total_wins || 0,
+              total_games: profile.total_games || 0,
+              total_conquests: profile.total_conquests || 0,
+            });
+            // Ekranı değiştirme! Kullanıcı neredeyse orada kalsın
+          }
         }
       }
     );
 
     return () => {
+      isMounted = false;
       subscription.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const checkAuth = async () => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-
-      if (session?.user) {
-        const { data: profile } = await getProfile(session.user.id);
-        if (profile) {
-          setUser({
-            id: profile.id,
-            email: profile.email,
-            username: profile.username,
-            created_at: profile.created_at,
-            achievements: profile.achievements || [],
-            total_wins: profile.total_wins || 0,
-            total_games: profile.total_games || 0,
-            total_conquests: profile.total_conquests || 0,
-          });
-          setScreen('menu');
-        } else {
-          setScreen('auth');
-        }
-      } else {
+  // Auth hazır olana kadar authReady'yi takip et
+  useEffect(() => {
+    if (authReady && screen === 'loading') {
+      // 3 saniye içinde hala loading'deyse auth'a yönlendir
+      const timeout = setTimeout(() => {
         setScreen('auth');
-      }
-    } catch {
-      setScreen('auth');
+      }, 3000);
+      return () => clearTimeout(timeout);
     }
+  }, [authReady, screen]);
 
-    setLoading(false);
-  };
-
-  // Solo oyun başlat
   const handleSoloStart = (roomId: string) => {
     setCurrentRoomId(roomId);
     setScreen('game');
   };
 
-  // Oda oluşturuldu
   const handleRoomCreated = (roomId: string) => {
     setCurrentRoomId(roomId);
     setScreen('lobby');
   };
 
-  // Odaya katıldı
   const handleRoomJoined = (roomId: string) => {
     setCurrentRoomId(roomId);
     setScreen('lobby');
   };
 
-  // Oyun başladı (lobiden)
   const handleGameStart = (roomId: string) => {
     setCurrentRoomId(roomId);
     setScreen('game');
   };
 
-  // Ana menüye dön
   const handleBackToMenu = () => {
     setCurrentRoomId('');
     setScreen('menu');
   };
 
-  // Ekran render
   const renderScreen = () => {
     switch (screen) {
       case 'loading':
